@@ -54,9 +54,14 @@ def main():
     print(f"  region   : {region}")
     print(f"  accountId: {account_id}\n")
 
-    config["s3_bucket"] = prompt("S3 bucket name", default=config.get("s3_bucket"))
+    default_s3 = config.get("s3_bucket") or f"storage-for-rag-project-{account_id}-{region}"
+    config["s3_bucket"] = prompt("S3 bucket name", default=default_s3)
     config["knowledge_base_id"] = prompt("Knowledge Base ID", default=config.get("knowledge_base_id"))
     config["tavily_api_key"] = prompt("Tavily API Key", default=config.get("tavily_api_key"))
+    if config.get("sharing_url"):
+        print(f"  sharing_url: {config['sharing_url']}")
+    else:
+        print("  sharing_url: (auto-detected on app start via CloudFront)")
 
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
     with open(config_path, "w", encoding="utf-8") as f:

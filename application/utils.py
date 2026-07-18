@@ -56,8 +56,52 @@ if not accountId:
 
 bedrock_region = config.get('region', 'us-west-2')
 logger.info(f"bedrock_region: {bedrock_region}")
-projectName = config.get('projectName', 'power-trade')
+projectName = config.get('projectName', 'langgraph-skills')
 logger.info(f"projectName: {projectName}")
+
+region = config.get('region', 'us-west-2')
+s3_bucket = config.get('s3_bucket') or f'storage-for-rag-project-{accountId}-{region}'
+sharing_url = config.get('sharing_url', '') or ''
+
+# Persist default s3_bucket so upload_file_to_s3 can be registered
+if not config.get('s3_bucket'):
+    config['s3_bucket'] = s3_bucket
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+    logger.info(f"s3_bucket set to default: {s3_bucket}")
+
+
+def update_sharing_url():
+    """Look up CloudFront distribution domain for this project and save as sharing_url."""
+    try:
+        cf_client = boto3.client('cloudfront', region_name=region)
+        paginator = cf_client.get_paginator('list_distributions')
+        # Try current project, then common rag-project origin used by agent-skills
+        target_origin_ids = [f"s3-{projectName}", "s3-rag-project", "s3-power-trade"]
+
+        for page in paginator.paginate():
+            dist_list = page.get('DistributionList', {})
+            for dist in dist_list.get('Items', []):
+                origins = dist.get('Origins', {}).get('Items', [])
+                for origin in origins:
+                    if origin.get('Id') in target_origin_ids:
+                        domain = dist['DomainName']
+                        url = f"https://{domain}"
+                        logger.info(f"sharing_url found: {url} (origin={origin.get('Id')})")
+                        config['sharing_url'] = url
+                        with open(config_path, "w", encoding="utf-8") as f:
+                            json.dump(config, f, indent=2)
+                        return url
+        logger.warning(f"CloudFront distribution with origins {target_origin_ids} not found")
+    except Exception:
+        err_msg = traceback.format_exc()
+        logger.info(f"Failed to look up sharing_url: {err_msg}")
+    return ''
+
+
+if not sharing_url:
+    sharing_url = update_sharing_url()
+
 
 def get_contents_type(file_name):
     if file_name.lower().endswith((".jpg", ".jpeg")):

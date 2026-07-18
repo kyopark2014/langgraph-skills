@@ -38,7 +38,7 @@ logging.basicConfig(
 logger = logging.getLogger("langgraph_agent")
 
 config = utils.load_config()
-sharing_url = config.get("sharing_url")
+sharing_url = config.get("sharing_url") or getattr(utils, "sharing_url", None)
 s3_prefix = "docs"
 user_id = "langgraph"
 
@@ -334,24 +334,38 @@ def upload_file_to_s3(filepath: str) -> str:
         import boto3
         from urllib import parse as url_parse
 
-        s3_bucket = config.get("s3_bucket")
+        s3_bucket = config.get("s3_bucket") or getattr(utils, "s3_bucket", None)
         if not s3_bucket:
             return "S3 bucket is not configured."
 
-        full_path = os.path.join(WORKING_DIR, filepath)
+        full_path = filepath if os.path.isabs(filepath) else os.path.join(WORKING_DIR, filepath)
         if not os.path.exists(full_path):
-            return f"File not found: {filepath}"
+            # also try relative to WORKING_DIR when agent passes artifacts/...
+            alt = os.path.join(WORKING_DIR, filepath.lstrip("/"))
+            if os.path.exists(alt):
+                full_path = alt
+            else:
+                return f"File not found: {filepath}"
 
-        content_type = utils.get_contents_type(filepath)
+        # Normalize S3 key to path relative to WORKING_DIR when possible
+        try:
+            s3_key = os.path.relpath(full_path, WORKING_DIR)
+        except ValueError:
+            s3_key = os.path.basename(full_path)
+        if s3_key.startswith(".."):
+            s3_key = os.path.basename(full_path)
+
+        content_type = utils.get_contents_type(s3_key)
         s3 = boto3.client("s3", region_name=config.get("region", "us-west-2"))
 
         with open(full_path, "rb") as f:
-            s3.put_object(Bucket=s3_bucket, Key=filepath, Body=f.read(), ContentType=content_type)
+            s3.put_object(Bucket=s3_bucket, Key=s3_key, Body=f.read(), ContentType=content_type)
 
-        if sharing_url:
-            url = f"{sharing_url}/{url_parse.quote(filepath)}"
+        effective_sharing = sharing_url or getattr(utils, "sharing_url", None) or config.get("sharing_url")
+        if effective_sharing:
+            url = f"{effective_sharing.rstrip('/')}/{url_parse.quote(s3_key)}"
             return f"Upload complete: {url}"
-        return f"Upload complete: {chat.s3_uri_to_console_url(f"s3://{s3_bucket}/{filepath}", config.get("region", "us-west-2"))}"
+        return f"Upload complete: {chat.s3_uri_to_console_url(f's3://{s3_bucket}/{s3_key}', config.get('region', 'us-west-2'))}"
 
     except Exception as e:
         return f"Upload failed: {str(e)}"
@@ -392,8 +406,12 @@ def bash(command: str) -> str:
 
 def get_builtin_tools() -> list:
     """Return the list of built-in tools for the skill-aware agent."""
+    # Prefer live values from utils (auto-filled s3_bucket / sharing_url)
+    effective_sharing = sharing_url or getattr(utils, "sharing_url", None) or config.get("sharing_url")
+    effective_bucket = config.get("s3_bucket") or getattr(utils, "s3_bucket", None)
+
     tools = [execute_code, write_file, read_file, bash, get_current_time]
-    if sharing_url or config.get("s3_bucket"):
+    if effective_sharing or effective_bucket:
         tools.append(upload_file_to_s3)
     return tools
 

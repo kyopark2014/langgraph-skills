@@ -1,3 +1,18 @@
 __pycache__
 
 config.json
+*.json
+*.md
+*.txt
+*.pdf
+*.docx
+*.doc
+*.xls
+*.xlsx
+*.pptx
+*.ppt
+*.xlsm
+*.xlsb
+*.xltx
+*.json
+*.js
