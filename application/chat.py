@@ -20,7 +20,6 @@ from botocore.exceptions import ClientError
 from langchain_core.prompts import MessagesPlaceholder, ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, AIMessageChunk
-from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
@@ -87,10 +86,11 @@ model_type = "claude"
 models = info.get_model_info(model_name)
 model_id = models["model_id"]
 debug_mode = "Enable"
+skill_mode = "Enable"
 user_id = "agent"
 
-def update(modelName, debugMode):    
-    global model_name, model_id, model_type, debug_mode, reasoning_mode
+def update(modelName, debugMode, skillMode="Enable"):    
+    global model_name, model_id, model_type, debug_mode, skill_mode
     global models, user_id
 
     if model_name != modelName:
@@ -104,6 +104,10 @@ def update(modelName, debugMode):
     if debug_mode != debugMode:
         debug_mode = debugMode        
         logger.info(f"debug_mode: {debug_mode}")
+
+    if skill_mode != skillMode:
+        skill_mode = skillMode
+        logger.info(f"skill_mode: {skill_mode}")
 
 map_chain = dict() 
 checkpointers = dict() 
@@ -1159,152 +1163,12 @@ def get_tool_info(tool_name, tool_content):
 
     return content, urls, tool_references
 
-async def run_langgraph_agent(query, mcp_servers, history_mode, notification_queue):
-    queue = notification_queue if notification_queue else None
-    if queue:
-        queue.reset()
-
-    image_url = []
-    references = []
-
-    mcp_json = mcp_config.load_selected_config(mcp_servers)
-    logger.info(f"mcp_json: {mcp_json}")
-
-    server_params = langgraph_agent.load_multiple_mcp_server_parameters(mcp_json)
-    logger.info(f"server_params: {server_params}")    
-
-    try:
-        client = MultiServerMCPClient(server_params)
-        logger.info(f"MCP client created successfully")
-
-        tools = langgraph_agent.get_builtin_tools()        
-        mcp_tools = await client.get_tools()
-        if mcp_tools:
-            tools.extend(mcp_tools)
-        logger.info(f"get_tools() returned: {tools}")
-        
-        if tools is None:
-            logger.error("tools is None - MCP client failed to get tools")
-            tools = []
-        
-        tool_list = [tool.name for tool in tools] if tools else []
-        logger.info(f"tool_list: {tool_list}")
-        
-    except Exception as e:
-        logger.error(f"Error creating MCP client or getting tools: {e}")                        
-        tools = []
-        tool_list = []        
-
-    # If no tools available, use general conversation
-    if not tools:
-        logger.warning("No tools available, using general conversation mode")
-        result = "MCP 설정을 확인하세요."
-        if notification_queue is not None and debug_mode == "Enable":
-            update_final_result(notification_queue, result)
-        return result, image_url
-    
-    if history_mode == "Enable":
-        app = langgraph_agent.buildChatAgentWithHistory(tools)
-        config = {
-            "recursion_limit": 50,
-            "configurable": {
-                "thread_id": user_id,
-                "tools": tools,
-                "system_prompt": None,
-            },
-        }
-    else:
-        app = langgraph_agent.buildChatAgent(tools)
-        config = {
-            "recursion_limit": 50,
-            "configurable": {
-                "thread_id": user_id,
-                "tools": tools,
-                "system_prompt": None,
-            },
-        }        
-    
-    inputs = {
-        "messages": [HumanMessage(content=query)]
-    }
-            
-    result = ""
-    tool_used = False  # Track if tool was used
-    tool_name = toolUseId = ""
-    async for stream in app.astream(inputs, config, stream_mode="messages"):
-        if isinstance(stream[0], AIMessageChunk):
-            message = stream[0]    
-            input = {}        
-            if isinstance(message.content, list):
-                for content_item in message.content:
-                    if isinstance(content_item, dict):
-                        if content_item.get('type') == 'text':
-                            text_content = content_item.get('text', '')
-                            # logger.info(f"text_content: {text_content}")
-                            
-                            # If tool was used, start fresh result
-                            if tool_used:
-                                result = text_content
-                                tool_used = False
-                            else:
-                                result += text_content
-                                
-                            # logger.info(f"result: {result}")                
-                            if debug_mode == "Enable" and queue:
-                                queue.stream(result)
-
-                        elif content_item.get('type') == 'tool_use':
-                            # logger.info(f"content_item: {content_item}")      
-                            if 'id' in content_item and 'name' in content_item:
-                                toolUseId = content_item.get('id', '')
-                                tool_name = content_item.get('name', '')
-                                logger.info(f"tool_name: {tool_name}, toolUseId: {toolUseId}")
-                                if queue:
-                                    queue.register_tool(toolUseId, tool_name)
-                                                                    
-                            if 'partial_json' in content_item:
-                                partial_json = content_item.get('partial_json', '')
-                                
-                                if toolUseId not in tool_input_list:
-                                    tool_input_list[toolUseId] = ""                                
-                                tool_input_list[toolUseId] += partial_json
-                                input = tool_input_list[toolUseId]
-
-                                if queue:
-                                    queue.tool_update(toolUseId, f"Tool: {tool_name}, Input: {input}")
-                        
-        elif isinstance(stream[0], ToolMessage):
-            message = stream[0]
-            logger.info(f"ToolMessage: {message.name}, {message.content}")
-            tool_name = message.name
-            toolResult = message.content
-            toolUseId = message.tool_call_id
-            logger.info(f"toolResult: {toolResult}, toolUseId: {toolUseId}")
-            if debug_mode == "Enable":
-                add_notification(notification_queue, f"Tool Result: {toolResult}")
-            tool_used = True
-            
-            content, urls, refs = get_tool_info(tool_name, toolResult)
-            if refs:
-                for r in refs:
-                    references.append(r)
-                logger.info(f"refs: {refs}")
-            if urls:
-                for url in urls:
-                    image_url.append(url)
-                logger.info(f"urls: {urls}")
-
-            if content:
-                logger.info(f"content: {content}")        
-    
-    if not result:
-        result = "답변을 찾지 못하였습니다."        
-    logger.info(f"result: {result}")
-
-    if references:
-        result += _format_references_markdown(references)
-    
-    if notification_queue is not None and debug_mode == "Enable":
-        update_final_result(notification_queue, result)
-    
-    return result, image_url
+async def run_langgraph_agent(query, mcp_servers, history_mode, notification_queue, skill_list=None):
+    """Delegate to langgraph_agent (MCP + Skills)."""
+    return await langgraph_agent.run_langgraph_agent(
+        query=query,
+        mcp_servers=mcp_servers,
+        skill_list=skill_list or [],
+        history_mode=history_mode,
+        notification_queue=notification_queue,
+    )

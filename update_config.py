@@ -48,7 +48,8 @@ def main():
 
     config["region"] = region
     config["accountId"] = account_id
-    config.setdefault("projectName", "power-trade")
+    config.setdefault("projectName", "langgraph-skills")
+    config.setdefault("default_skills", ["skill-creator", "docx", "pdf", "pptx", "xlsx"])
 
     print(f"  region   : {region}")
     print(f"  accountId: {account_id}\n")

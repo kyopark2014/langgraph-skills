@@ -31,12 +31,13 @@ def load_config():
         session = boto3.Session()
         region = session.region_name
         config['region'] = region
-        config['projectName'] = "power-trade"
+        config['projectName'] = "langgraph-skills"
         
         sts = boto3.client("sts")
         response = sts.get_caller_identity()
         accountId = response["Account"]
         config['accountId'] = accountId
+        config['default_skills'] = ["skill-creator", "docx", "pdf", "pptx", "xlsx"]
         
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)    

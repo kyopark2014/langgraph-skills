@@ -6,6 +6,8 @@ import logging
 import sys
 import os
 import asyncio
+import utils
+import skill
 from notification_queue import NotificationQueue
 
 logging.basicConfig(
@@ -19,8 +21,10 @@ logger = logging.getLogger("streamlit")
 
 os.environ["DEV"] = "true"  # Skip user confirmation of get_user_input
 
+config = utils.load_config()
+
 # title
-st.set_page_config(page_title='Agent', page_icon=None, layout="centered", initial_sidebar_state="auto", menu_items=None)
+st.set_page_config(page_title='Agent Skills', page_icon=None, layout="centered", initial_sidebar_state="auto", menu_items=None)
 
 mode_descriptions = {
     "일상적인 대화": [
@@ -30,10 +34,10 @@ mode_descriptions = {
         "Bedrock Knowledge Base를 이용해 구현한 RAG로 필요한 정보를 검색합니다."
     ],
     "Agent": [
-        "MCP와 LangGraph를 활용한 Agent를 이용합니다. 왼쪽 메뉴에서 필요한 MCP를 선택하세요."
+        "MCP와 Skill을 활용한 Agent를 이용합니다. 왼쪽 메뉴에서 필요한 Skill/MCP를 선택하세요."
     ],
     "Agent (Chat)": [
-        "MCP를 활용한 Agent를 이용합니다. 채팅 히스토리를 이용해 interative한 대화를 즐길 수 있습니다."
+        "MCP와 Skill을 활용한 Agent를 이용합니다. 채팅 히스토리를 이용해 interactive한 대화를 즐길 수 있습니다."
     ],
     "이미지 분석": [
         "이미지를 선택하여 멀티모달을 이용하여 분석합니다."
@@ -46,9 +50,9 @@ with st.sidebar:
     
     st.markdown(
         "Amazon Bedrock을 이용해 다양한 형태의 대화를 구현합니다." 
-        "여기에서는 MCP를 이용해 RAG를 비롯한 데이터 분석용 기능을 구현합니다." 
+        "여기에서는 MCP와 Agent Skills를 함께 이용해 도구 호출과 절차적 지침을 제공합니다." 
         "주요 코드는 LangChain과 LangGraph를 이용해 구현되었습니다.\n"
-        "상세한 코드는 [Github](https://github.com/kyopark2014/power-trade)을 참조하세요."
+        "상세한 코드는 [Github](https://github.com/kyopark2014/langgraph-skills)을 참조하세요."
     )
 
     st.subheader("🐱 대화 형태")
@@ -59,12 +63,36 @@ with st.sidebar:
     )   
     st.info(mode_descriptions[mode][0])
     
-    # mcp selection    
+    selected_skills = []
+    # mcp / skill selection    
     if mode=='Agent' or mode=='Agent (Chat)':
-        # MCP Config JSON input
+        st.subheader("⚙️ Skill Config")
+
+        skill_selections = {}
+        default_skill_selections = config.get("default_skills") or ["skill-creator", "docx", "pdf", "pptx", "xlsx"]
+        logger.info(f"default_skill_selections: {default_skill_selections}")
+        with st.expander("Skill 옵션 선택", expanded=True):
+            available = skill.available_skill_info()
+            for s in available:
+                default_value = s["name"] in default_skill_selections
+                skill_selections[s["name"]] = st.checkbox(
+                    s["name"],
+                    key=f"skill_{s['name']}",
+                    value=default_value,
+                    help=s["description"],
+                )
+
+        selected_skills = [name for name, is_selected in skill_selections.items() if is_selected]
+        logger.info(f"selected_skills: {selected_skills}")
+
+        if selected_skills != config.get("default_skills"):
+            config["default_skills"] = selected_skills
+            with open(utils.config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, ensure_ascii=False, indent=4)
+
+        # MCP Config
         st.subheader("⚙️ MCP Config")
 
-        # Change radio to checkbox
         mcp_options = [
             "tavily", 
             "knowledge base", 
@@ -135,21 +163,23 @@ with st.sidebar:
         ), index=0
     )
 
+    # skill checkbox
+    select_skillMode = st.checkbox('Skill Mode', value=True)
+    skillMode = 'Enable' if select_skillMode else 'Disable'
+
     # debug checkbox
     select_debugMode = st.checkbox('Debug Mode', value=True)
     debugMode = 'Enable' if select_debugMode else 'Disable'
-    #print('debugMode: ', debugMode)
 
     uploaded_file = None
     if mode=='이미지 분석':
         st.subheader("🌇 이미지 업로드")
         uploaded_file = st.file_uploader("이미지 분석을 위한 파일을 선택합니다.", type=["png", "jpg", "jpeg"])
 
-    chat.update(modelName, debugMode)    
+    chat.update(modelName, debugMode, skillMode)    
 
     st.success(f"Connected to {modelName}", icon="💚")
     clear_button = st.button("대화 초기화", key="clear")
-    # logger.info(f"clear_button: {clear_button}")
 
 st.title('🔮 '+ mode)
 
@@ -290,7 +320,8 @@ if prompt := st.chat_input("메시지를 입력하세요."):
 
                 response, image_url = asyncio.run(chat.run_langgraph_agent(
                     query=prompt, 
-                    mcp_servers=mcp_servers, 
+                    mcp_servers=mcp_servers,
+                    skill_list=selected_skills,
                     history_mode=history_mode, 
                     notification_queue=notification_queue))
 

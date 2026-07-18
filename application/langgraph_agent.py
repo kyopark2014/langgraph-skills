@@ -3,10 +3,12 @@ import sys
 import traceback
 import chat
 import utils
-import sys
+import skill
+import mcp_config
+import subprocess
+import datetime
 
-from langgraph.prebuilt import ToolNode
-from typing import Literal
+from typing import Literal, Optional
 from langgraph.graph import START, END, StateGraph
 from typing_extensions import Annotated, TypedDict
 from langgraph.graph.message import add_messages
@@ -14,14 +16,20 @@ from langchain_core.prompts import MessagesPlaceholder, ChatPromptTemplate
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langchain_core.messages.base import BaseMessage, BaseMessageChunk
 from langchain_core.messages.ai import AIMessage, AIMessageChunk
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from notification_queue import NotificationQueue
+from pytz import timezone
 from langgraph.prebuilt import ToolNode
-from typing import Literal
-from langgraph.graph import START, END, StateGraph
-from typing_extensions import Annotated, TypedDict
-from langgraph.graph.message import add_messages
+
+import io, os, json
+import subprocess as _subprocess, pathlib as _pathlib, shutil as _shutil
+import tempfile as _tempfile, glob as _glob, datetime as _datetime
+import math as _math, re as _re, requests as _requests
+from urllib.parse import quote
+from langchain_core.tools import tool
 
 logging.basicConfig(
-    level=logging.INFO,  
+    level=logging.INFO,
     format='%(filename)s:%(lineno)d | %(message)s',
     handlers=[
         logging.StreamHandler(sys.stderr)
@@ -30,16 +38,9 @@ logging.basicConfig(
 logger = logging.getLogger("langgraph_agent")
 
 config = utils.load_config()
-sharing_url = config["sharing_url"] if "sharing_url" in config else None
+sharing_url = config.get("sharing_url")
 s3_prefix = "docs"
 user_id = "langgraph"
-
-import io, os, sys, json, traceback
-import subprocess as _subprocess, pathlib as _pathlib, shutil as _shutil
-import tempfile as _tempfile, glob as _glob, datetime as _datetime
-import math as _math, re as _re, requests as _requests
-from urllib.parse import quote
-from langchain_core.tools import tool
 
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
 ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
@@ -47,6 +48,32 @@ ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
 _ARTIFACT_EXT = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"})
 
 _mpl_runtime_ready = False
+
+
+def _ensure_cli_scripts_on_path() -> None:
+    """Prepend pip user script dir so CLIs resolve in subprocess."""
+    import site
+    import sysconfig
+
+    extra: list[str] = []
+    user_base = getattr(site, "USER_BASE", None)
+    if user_base:
+        user_bin = os.path.join(user_base, "bin")
+        if os.path.isdir(user_bin):
+            extra.append(user_bin)
+    try:
+        scripts = sysconfig.get_path("scripts")
+        if scripts and os.path.isdir(scripts):
+            extra.append(scripts)
+    except Exception:
+        pass
+    path = os.environ.get("PATH", "")
+    parts = [p for p in path.split(os.pathsep) if p]
+    for d in reversed(extra):
+        if d and d not in parts:
+            parts.insert(0, d)
+    os.environ["PATH"] = os.pathsep.join(parts)
+
 
 def _artifact_files_mtime_snapshot() -> dict:
     """WORKING_DIR 기준 상대 경로 -> mtime. artifacts/ 이하만 스캔."""
@@ -146,9 +173,6 @@ _exec_globals = {
     "WORKING_DIR": WORKING_DIR,
     "ARTIFACTS_DIR": ARTIFACTS_DIR,
 }
-
-import datetime
-from pytz import timezone
 
 @tool
 def get_current_time(format: str=f"%Y-%m-%d %H:%M:%S")->str:
@@ -332,9 +356,46 @@ def upload_file_to_s3(filepath: str) -> str:
     except Exception as e:
         return f"Upload failed: {str(e)}"
 
+
+@tool
+def bash(command: str) -> str:
+    """Execute a bash command and return the result.
+
+    Use this for shell commands needed by skills (e.g. CLI tools, package installs).
+    Working directory is the application folder.
+
+    Args:
+        command: Shell command to run.
+
+    Returns:
+        Captured stdout/stderr, or an error message.
+    """
+    logger.info(f"###### bash: {command} ######")
+    _ensure_cli_scripts_on_path()
+    try:
+        result = subprocess.run(
+            command, shell=True, capture_output=True, text=True,
+            cwd=WORKING_DIR, timeout=300,
+            env=os.environ,
+        )
+    except subprocess.TimeoutExpired:
+        return "Error: command timed out after 300 seconds."
+    parts = []
+    if result.stdout:
+        parts.append(f"STDOUT:\n{result.stdout}")
+    if result.stderr:
+        parts.append(f"STDERR:\n{result.stderr}")
+    if result.returncode != 0:
+        parts.append(f"Return code: {result.returncode}")
+    return "\n".join(parts) if parts else "(no output)"
+
+
 def get_builtin_tools() -> list:
     """Return the list of built-in tools for the skill-aware agent."""
-    return [execute_code, write_file, read_file, upload_file_to_s3, get_current_time]
+    tools = [execute_code, write_file, read_file, bash, get_current_time]
+    if sharing_url or config.get("s3_bucket"):
+        tools.append(upload_file_to_s3)
+    return tools
 
 def message_chunk_to_message(chunk: BaseMessage) -> BaseMessage:
     """Convert a message chunk to a `Message`.
@@ -359,6 +420,13 @@ class State(TypedDict):
     messages: Annotated[list, add_messages]
     image_url: list
 
+BASE_SYSTEM_PROMPT = (
+    "당신의 이름은 서연이고, 질문에 친근한 방식으로 대답하도록 설계된 대화형 AI입니다.\n"
+    "상황에 맞는 구체적인 세부 정보를 충분히 제공합니다.\n"
+    "모르는 질문을 받으면 솔직히 모른다고 말합니다.\n"
+    "한국어로 답변하세요."
+)
+
 async def call_model(state: State, config):
     logger.info(f"###### call_model ######")
 
@@ -367,39 +435,25 @@ async def call_model(state: State, config):
     
     image_url = state['image_url'] if 'image_url' in state else []
 
-    tools = get_builtin_tools() # builtin tools
+    tools = get_builtin_tools()
 
     cfg = config.get("configurable") or {}
-    mcp_tools = cfg.get("tools")
-    if not mcp_tools and isinstance(config, dict):
-        mcp_tools = config.get("tools") or []  # mcp tools
-    if mcp_tools:
-        tool_names = {tool.name for tool in tools} 
-        for bt in mcp_tools:
+    bound_tools = cfg.get("tools")
+    if not bound_tools and isinstance(config, dict):
+        bound_tools = config.get("tools") or []
+    if bound_tools:
+        tool_names = {tool.name for tool in tools}
+        for bt in bound_tools:
             if bt.name not in tool_names:
                 tools.append(bt)
             else:
-                logger.info(f"builtin_tool {bt.name} already in tools")
+                logger.info(f"tool {bt.name} already in tools")
 
     system_prompt = cfg.get("system_prompt")
-    
-    if system_prompt:
-        system = system_prompt
-    else:
-        system = (
-            "당신의 이름은 서연이고, 질문에 친근한 방식으로 대답하도록 설계된 대화형 AI입니다."
-            "상황에 맞는 구체적인 세부 정보를 충분히 제공합니다."
-            "모르는 질문을 받으면 솔직히 모른다고 말합니다."
-            "한국어로 답변하세요."
+    if not system_prompt and isinstance(config, dict):
+        system_prompt = config.get("system_prompt")
 
-            "An agent orchestrates the following workflow:"
-            "1. Receives user input"
-            "2. Processes the input using a language model"
-            "3. Decides whether to use tools to gather information or perform actions"
-            "4. Executes those tools and receives results"
-            "5. Continues reasoning with the new information"
-            "6. Produces a final response"
-        )
+    system = system_prompt if system_prompt else BASE_SYSTEM_PROMPT
 
     chatModel = chat.get_chat()    
     
@@ -414,7 +468,6 @@ async def call_model(state: State, config):
                     text_parts = []
                     for item in content:
                         if isinstance(item, dict):
-                            # Remove 'id' field if present, but keep other fields
                             item_clean = {k: v for k, v in item.items() if k != 'id'}
                             if 'text' in item_clean:
                                 text_parts.append(item_clean['text'])
@@ -426,7 +479,6 @@ async def call_model(state: State, config):
                 elif not isinstance(content, str):
                     content = str(content)
                 
-                # Create ToolMessage without 'name' field (Bedrock doesn't accept it)
                 tool_msg = ToolMessage(
                     content=content,
                     tool_call_id=msg.tool_call_id
@@ -443,7 +495,6 @@ async def call_model(state: State, config):
         )
         chain = prompt | model
             
-        # Stream tokens/chunks to the graph via astream (use with stream_mode="messages")
         accumulated: AIMessageChunk | None = None
         async for chunk in chain.astream({"messages": messages}):
             if accumulated is None:
@@ -538,17 +589,17 @@ def load_multiple_mcp_server_parameters(mcp_json: dict):
   
     server_info = {}
     if mcpServers is not None:
-        for server_name, config in mcpServers.items():
-            if config.get("type") == "streamable_http":
+        for server_name, cfg in mcpServers.items():
+            if cfg.get("type") == "streamable_http":
                 server_info[server_name] = {                    
                     "transport": "streamable_http",
-                    "url": config.get("url"),
-                    "headers": config.get("headers", {})
+                    "url": cfg.get("url"),
+                    "headers": cfg.get("headers", {})
                 }
             else:
-                command = config.get("command", "")
-                args = config.get("args", [])
-                env = config.get("env", {})
+                command = cfg.get("command", "")
+                args = cfg.get("args", [])
+                env = cfg.get("env", {})
                 
                 server_info[server_name] = {
                     "transport": "stdio",
@@ -557,4 +608,179 @@ def load_multiple_mcp_server_parameters(mcp_json: dict):
                     "env": env                    
                 }
     return server_info
+
+
+async def create_agent(mcp_servers: list, skill_list: list, history_mode: str = "Disable"):
+    """Build LangGraph agent with builtin + MCP + optional Skill tools."""
+    tools = get_builtin_tools()
+    logger.info(f"builtin_tools count: {len(tools)}")
+
+    mcp_json = mcp_config.load_selected_config(mcp_servers)
+    server_params = load_multiple_mcp_server_parameters(mcp_json)
+
+    try:
+        client = MultiServerMCPClient(server_params)
+        logger.info("MCP client is initialized successfully")
+
+        mcp_tools = await client.get_tools()
+        for t in mcp_tools:
+            logger.info(f"mcp_tool: {t.name}")
+            if t.name not in {x.name for x in tools}:
+                tools.append(t)
+            else:
+                logger.info(f"mcp_tool of {t.name} already in tools")
+    except Exception as e:
+        logger.error(f"Error creating MCP client or getting tools: {e}")
+        logger.info(f"Falling back to builtin tools only (count: {len(tools)})")
+
+    if chat.skill_mode == "Enable":
+        tools.extend(skill.get_skill_tools())
+        skill_info = skill.get_skill_info(skill_list)
+        logger.info(f"skill_info: {skill_info}")
+        system_prompt = skill.build_skill_prompt(skill_info)
+    else:
+        system_prompt = BASE_SYSTEM_PROMPT
+
+    tool_list = [t.name for t in tools] if tools else []
+    logger.info(f"tool_list: {tool_list}")
+
+    if not tools:
+        logger.warning("No tools available")
+        return None, None
+
+    if history_mode == "Enable":
+        app = buildChatAgentWithHistory(tools)
+    else:
+        app = buildChatAgent(tools)
+
+    agent_config = {
+        "recursion_limit": 100,
+        "configurable": {
+            "thread_id": chat.user_id,
+            "tools": tools,
+            "system_prompt": system_prompt,
+        },
+        "tools": tools,
+        "system_prompt": system_prompt,
+    }
+    return app, agent_config
+
+
+_app = None
+_agent_config = None
+_active_mcp_servers = []
+_active_skills = []
+_active_skill_mode = None
+_current_id = None
+
+
+async def run_langgraph_agent(
+    query: str,
+    mcp_servers: list,
+    skill_list: Optional[list] = None,
+    history_mode: str = "Disable",
+    notification_queue: Optional[NotificationQueue] = None,
+) -> tuple:
+    """Run the MCP+Skills LangGraph agent and stream results to the UI queue."""
+    global _app, _agent_config, _active_mcp_servers, _active_skills, _active_skill_mode, _current_id
+
+    skill_list = skill_list or []
+    queue = notification_queue if notification_queue else None
+    if queue:
+        queue.reset()
+
+    image_url = []
+    references = []
+
+    if (
+        _app is None
+        or _active_mcp_servers != mcp_servers
+        or _active_skills != skill_list
+        or _active_skill_mode != chat.skill_mode
+        or _current_id != chat.user_id
+    ):
+        _active_mcp_servers = mcp_servers
+        _active_skills = skill_list
+        _active_skill_mode = chat.skill_mode
+        _current_id = chat.user_id
+        _app, _agent_config = await create_agent(mcp_servers, skill_list, history_mode)
+
+    if _app is None:
+        logger.error("Failed to create agent - app is None")
+        return "에이전트를 생성할 수 없습니다. MCP 서버 설정 또는 도구 구성을 확인해주세요.", []
+
+    inputs = {"messages": [HumanMessage(content=query)]}
+
+    result = ""
+    tool_used = False
+    tool_name = toolUseId = ""
+    chat.tool_input_list.clear()
+
+    async for stream in _app.astream(inputs, _agent_config, stream_mode="messages"):
+        if isinstance(stream[0], AIMessageChunk):
+            message = stream[0]
+            if isinstance(message.content, list):
+                for content_item in message.content:
+                    if not isinstance(content_item, dict):
+                        continue
+                    if content_item.get("type") == "text":
+                        text_content = content_item.get("text", "")
+                        if tool_used:
+                            result = text_content
+                            tool_used = False
+                        else:
+                            result += text_content
+                        if chat.debug_mode == "Enable" and queue:
+                            queue.stream(result)
+
+                    elif content_item.get("type") == "tool_use":
+                        if "id" in content_item and "name" in content_item:
+                            toolUseId = content_item.get("id", "")
+                            tool_name = content_item.get("name", "")
+                            logger.info(f"tool_name: {tool_name}, toolUseId: {toolUseId}")
+                            if queue:
+                                queue.register_tool(toolUseId, tool_name)
+
+                        if "partial_json" in content_item:
+                            partial_json = content_item.get("partial_json", "")
+                            if toolUseId not in chat.tool_input_list:
+                                chat.tool_input_list[toolUseId] = ""
+                            chat.tool_input_list[toolUseId] += partial_json
+                            if queue:
+                                queue.tool_update(
+                                    toolUseId,
+                                    f"Tool: {tool_name}, Input: {chat.tool_input_list[toolUseId]}",
+                                )
+
+        elif isinstance(stream[0], ToolMessage):
+            message = stream[0]
+            logger.info(f"ToolMessage: {message.name}, {message.content}")
+            tool_name = message.name
+            toolResult = message.content
+            toolUseId = message.tool_call_id
+            if chat.debug_mode == "Enable":
+                chat.add_notification(notification_queue, f"Tool Result: {toolResult}")
+            tool_used = True
+
+            content, urls, refs = chat.get_tool_info(tool_name, toolResult)
+            if refs:
+                references.extend(refs)
+                logger.info(f"refs: {refs}")
+            if urls:
+                image_url.extend(urls)
+                logger.info(f"urls: {urls}")
+            if content:
+                logger.info(f"content: {content}")
+
+    if not result:
+        result = "답변을 찾지 못하였습니다."
+    logger.info(f"result: {result}")
+
+    if references:
+        result += chat._format_references_markdown(references)
+
+    if notification_queue is not None and chat.debug_mode == "Enable":
+        chat.update_final_result(notification_queue, result)
+
+    return result, image_url
 
