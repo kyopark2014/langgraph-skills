@@ -49,7 +49,24 @@ def main():
     config["region"] = region
     config["accountId"] = account_id
     config.setdefault("projectName", "langgraph-skills")
-    config.setdefault("default_skills", ["skill-creator", "docx", "pdf", "pptx", "xlsx"])
+    config.pop("default_skills", None)
+    config.pop("default_mcp_servers", None)
+
+    favorite_tools_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "application", "favorite_tools.json"
+    )
+    if not os.path.exists(favorite_tools_path):
+        with open(favorite_tools_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "MCP": ["tavily", "knowledge base", "aws documentation"],
+                    "SKILL": ["skill-creator", "docx"],
+                },
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
+        print(f"Created: {favorite_tools_path}")
 
     print(f"  region   : {region}")
     print(f"  accountId: {account_id}\n")

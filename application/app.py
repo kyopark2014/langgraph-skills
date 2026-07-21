@@ -69,7 +69,7 @@ with st.sidebar:
         st.subheader("⚙️ Skill Config")
 
         skill_selections = {}
-        default_skill_selections = config.get("default_skills") or ["skill-creator", "docx", "pdf", "pptx", "xlsx"]
+        default_skill_selections, default_mcp_selections = utils.get_initial_tool_defaults()
         logger.info(f"default_skill_selections: {default_skill_selections}")
         with st.expander("Skill 옵션 선택", expanded=True):
             available = skill.available_skill_info()
@@ -85,11 +85,6 @@ with st.sidebar:
         selected_skills = [name for name, is_selected in skill_selections.items() if is_selected]
         logger.info(f"selected_skills: {selected_skills}")
 
-        if selected_skills != config.get("default_skills"):
-            config["default_skills"] = selected_skills
-            with open(utils.config_path, "w", encoding="utf-8") as f:
-                json.dump(config, f, ensure_ascii=False, indent=4)
-
         # MCP Config
         st.subheader("⚙️ MCP Config")
 
@@ -103,11 +98,11 @@ with st.sidebar:
             "사용자 설정"
         ]
         mcp_selections = {}
-        default_selections = ["tavily", "knowledge base", "aws documentation"]
+        logger.info(f"default_mcp_selections: {default_mcp_selections}")
         
         with st.expander("MCP 옵션 선택", expanded=True):
             for option in mcp_options:
-                default_value = option in default_selections
+                default_value = option in default_mcp_selections
                 mcp_selections[option] = st.checkbox(option, key=f"mcp_{option}", value=default_value)
             
         if mcp_selections["사용자 설정"]:
@@ -147,6 +142,12 @@ with st.sidebar:
             logger.info("save to user_defined_mcp.json")
         
         mcp_servers = [server for server, is_selected in mcp_selections.items() if is_selected]
+
+        if (
+            selected_skills != default_skill_selections
+            or mcp_servers != default_mcp_selections
+        ):
+            utils.save_favorite_tools(skills=selected_skills, mcp_servers=mcp_servers)
     else:
         mcp_servers = []
 

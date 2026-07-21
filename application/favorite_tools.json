@@ -1,0 +1,12 @@
+{
+  "MCP": [
+    "tavily",
+    "knowledge base",
+    "aws documentation",
+    "web_fetch"
+  ],
+  "SKILL": [
+    "skill-creator",
+    "docx"
+  ]
+}

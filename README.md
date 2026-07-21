@@ -241,7 +241,7 @@ A .docx file is a ZIP archive containing XML files.
 | frontend-design | UI/프론트엔드 디자인 |
 | memory-manager | MEMORY.md 기반 메모리 관리 |
 
-활성화할 스킬은 `config.json`의 `default_skills`와 Streamlit 사이드바 **Skill Config** 체크박스로 선택합니다. **Skill Mode**가 켜져 있어야 skill tool/프롬프트가 agent에 붙습니다.
+활성화할 스킬은 `application/favorite_tools.json`의 `SKILL`과 Streamlit 사이드바 **Skill Config** 체크박스로 선택합니다. MCP 기본 선택은 같은 파일의 `MCP`를 사용합니다. **Skill Mode**가 켜져 있어야 skill tool/프롬프트가 agent에 붙습니다.
 
 ### 스킬의 동작 흐름
 

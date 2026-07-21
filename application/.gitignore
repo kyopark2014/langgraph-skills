@@ -15,4 +15,5 @@ config.json
 *.xlsb
 *.xltx
 *.json
+!favorite_tools.json
 *.js
