@@ -1,12 +1,9 @@
 {
   "MCP": [
-    "tavily",
-    "knowledge base",
-    "aws documentation",
+    "weather",
     "web_fetch"
   ],
   "SKILL": [
-    "skill-creator",
-    "docx"
+    "kma-weather"
   ]
 }
