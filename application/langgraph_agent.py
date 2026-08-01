@@ -733,10 +733,22 @@ async def run_langgraph_agent(
     tool_used = False
     tool_name = toolUseId = ""
     chat.tool_input_list.clear()
+    stop_reason: str | None = None
+
+    def remember_stop_reason(message) -> None:
+        nonlocal stop_reason
+        meta = getattr(message, "response_metadata", None) or {}
+        if not isinstance(meta, dict):
+            return
+        reason = meta.get("stopReason") or meta.get("stop_reason")
+        if reason:
+            stop_reason = reason
+            logger.info(f"[stop_reason] {stop_reason}")
 
     async for stream in _app.astream(inputs, _agent_config, stream_mode="messages"):
         if isinstance(stream[0], AIMessageChunk):
             message = stream[0]
+            remember_stop_reason(message)
             if isinstance(message.content, list):
                 for content_item in message.content:
                     if not isinstance(content_item, dict):
@@ -790,7 +802,24 @@ async def run_langgraph_agent(
             if content:
                 logger.info(f"content: {content}")
 
-    if not result:
+    # Final stop_reason wins even when earlier turns left preamble text
+    # (e.g. "확인해보겠습니다" + tools, then empty refusal).
+    if stop_reason == "content_filtered":
+        result = (
+            "요청이 모델 안전 정책에 의해 차단되었습니다. "
+            "다른 모델로 시도하거나 질문을 바꿔 주세요."
+        )
+    elif stop_reason == "guardrail_intervened":
+        result = (
+            "요청이 Guardrail 안전 정책에 의해 차단되었습니다. "
+            "질문을 바꿔 주세요."
+        )
+    elif stop_reason == "refusal":
+        result = (
+            "모델이 이 요청에 대한 응답을 거부했습니다. "
+            "다른 모델로 시도하거나 질문을 바꿔 주세요."
+        )
+    elif not result:
         result = "답변을 찾지 못하였습니다."
     logger.info(f"result: {result}")
 
