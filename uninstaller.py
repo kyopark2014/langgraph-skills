@@ -18,7 +18,7 @@ from botocore.exceptions import ClientError
 # Configuration (must match installer.py)
 project_name = "langgraph-skills"
 region = "us-west-2"
-AGENTCORE_GATEWAY_REGION = "us-east-1"
+AGENTCORE_GATEWAY_REGION = "us-west-2"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
 vector_index_name = "rag-project"
 cloudfront_comment = "CloudFront-for-rag-project"
